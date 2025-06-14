@@ -1,0 +1,279 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-Voting Face Verification</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            padding-top: 20px;
+        }
+        .verification-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+        }
+        .camera-container {
+            width: 100%;
+            position: relative;
+            margin-bottom: 20px;
+        }
+        #video {
+            width: 100%;
+            border-radius: 8px;
+            border: 2px solid #dee2e6;
+        }
+        #canvas {
+            display: none;
+        }
+        .btn-capture {
+            background-color: #28a745;
+            color: white;
+            font-weight: bold;
+        }
+        .btn-retake {
+            background-color: #dc3545;
+            color: white;
+            font-weight: bold;
+        }
+        .btn-continue {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+        }
+        .status-message {
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+        }
+        .preview-container {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        #preview {
+            width: 100%;
+            border-radius: 8px;
+            border: 2px solid #28a745;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="verification-container">
+            <h1 class="text-center mb-4">🗳️ E-Voting Face Verification</h1>
+            
+            <div class="alert alert-info">
+                <h4>Session Information</h4>
+                <p><strong>Session ID:</strong> {{ session_id }}</p>
+                <p><strong>Type:</strong> 
+                    {% if session_type == 'admin' %}
+                        Admin Verification
+                    {% elif session_type == 'vote' %}
+                        Voter Verification
+                    {% else %}
+                        Voter Registration
+                    {% endif %}
+                </p>
+            </div>
+            
+            {% if session_type == 'voter_registration' %}
+            <div class="mb-3">
+                <label for="matric" class="form-label">Enter Voter Matric Number:</label>
+                <input type="text" class="form-control" id="matric" placeholder="e.g., STU008" required>
+            </div>
+            {% endif %}
+            
+            <div id="camera-view">
+                <div class="camera-container">
+                    <video id="video" autoplay playsinline></video>
+                    <canvas id="canvas"></canvas>
+                </div>
+                
+                <div class="d-grid gap-2">
+                    <button id="startCamera" class="btn btn-primary">Turn On Camera</button>
+                    <button id="captureBtn" class="btn btn-capture" disabled>Capture Image</button>
+                </div>
+            </div>
+            
+            <div id="preview-view" class="hidden">
+                <div class="preview-container">
+                    <img id="preview" src="/placeholder.svg" alt="Captured face">
+                </div>
+                
+                <div class="d-grid gap-2">
+                    <button id="retakeBtn" class="btn btn-retake">Retake Image</button>
+                    <button id="continueBtn" class="btn btn-continue">Continue with this Image</button>
+                </div>
+            </div>
+            
+            <div id="status-message" class="status-message info mt-3">
+                Please turn on the camera to begin.
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // WebSocket setup
+        const sessionId = '{{ session_id }}';
+        const ws_scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        const ws_path = `${ws_scheme}://${window.location.host}/ws/verification/${sessionId}/`;
+        const socket = new WebSocket(ws_path);
+        
+        socket.onmessage = function(e) {
+            const data = JSON.parse(e.data);
+            if (data.type === 'status_update') {
+                updateStatus(data.message, data.status === 'completed' ? 'success' : 'info');
+            } else if (data.type === 'error') {
+                updateStatus(data.message, 'error');
+            }
+        };
+        
+        socket.onclose = function(e) {
+            console.log('WebSocket connection closed');
+        };
+        
+        // DOM elements
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const startCameraBtn = document.getElementById('startCamera');
+        const captureBtn = document.getElementById('captureBtn');
+        const retakeBtn = document.getElementById('retakeBtn');
+        const continueBtn = document.getElementById('continueBtn');
+        const preview = document.getElementById('preview');
+        const statusMessage = document.getElementById('status-message');
+        const cameraView = document.getElementById('camera-view');
+        const previewView = document.getElementById('preview-view');
+        const matricInput = document.getElementById('matric');
+        
+        let stream = null;
+        
+        // Start camera
+        startCameraBtn.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: 'user'
+                    } 
+                });
+                video.srcObject = stream;
+                captureBtn.disabled = false;
+                startCameraBtn.disabled = true;
+                updateStatus('Camera started. Position your face in the frame and click "Capture Image".', 'info');
+            } catch (err) {
+                updateStatus(`Error accessing camera: ${err.message}`, 'error');
+            }
+        });
+        
+        // Capture image
+        captureBtn.addEventListener('click', () => {
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            const imageDataUrl = canvas.toDataURL('image/jpeg');
+            preview.src = imageDataUrl;
+            
+            // Switch to preview view
+            cameraView.classList.add('hidden');
+            previewView.classList.remove('hidden');
+            
+            updateStatus('Image captured. Continue or retake?', 'info');
+        });
+        
+        // Retake image
+        retakeBtn.addEventListener('click', () => {
+            previewView.classList.add('hidden');
+            cameraView.classList.remove('hidden');
+            updateStatus('Position your face in the frame and click "Capture Image".', 'info');
+        });
+        
+        // Continue with image
+        continueBtn.addEventListener('click', async () => {
+            try {
+                updateStatus('Processing image...', 'info');
+                
+                const sessionType = '{{ session_type }}';
+                const data = {
+                    image: preview.src
+                };
+                
+                // Add matric number for voter registration
+                if (sessionType === 'voter_registration') {
+                    if (!matricInput.value) {
+                        updateStatus('Please enter a matric number', 'error');
+                        return;
+                    }
+                    data.matric = matricInput.value;
+                }
+                
+                // Send image to server
+                const response = await fetch(`/verification/api/process-image/${sessionId}/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    if (result.verified) {
+                        updateStatus('✅ Verification successful! You can now return to Telegram.', 'success');
+                    } else {
+                        updateStatus('❌ Verification failed. Please try again.', 'error');
+                        // Reset to camera view
+                        setTimeout(() => {
+                            previewView.classList.add('hidden');
+                            cameraView.classList.remove('hidden');
+                        }, 3000);
+                    }
+                } else {
+                    updateStatus(`❌ Error: ${result.message}`, 'error');
+                }
+            } catch (err) {
+                updateStatus(`❌ Error processing image: ${err.message}`, 'error');
+            }
+        });
+        
+        // Update status message
+        function updateStatus(message, type) {
+            statusMessage.textContent = message;
+            statusMessage.className = `status-message ${type}`;
+        }
+        
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        });
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+Django==4.2.7
+channels==4.0.0
+python-telegram-bot==20.6
+mtcnn==0.1.1
+keras-facenet==0.3.2
+opencv-python==4.8.1.78
+numpy==1.26.0
+scipy==1.11.3
+Pillow==10.1.0
