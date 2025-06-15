@@ -1,16 +1,27 @@
 import os
 from pathlib import Path
 
+# Only import decouple if it's available, otherwise use os.environ
+try:
+    from decouple import config
+except ImportError:
+    # Fallback to os.environ if decouple is not installed
+    def config(key, default=None, cast=None):
+        value = os.environ.get(key, default)
+        if cast and value is not None:
+            return cast(value)
+        return value
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-h7d3f8h3f8h38fh38fh38fh38fh38fh38fh38fh38fh38fh'
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-h7d3f8h3f8h38fh38fh38fh38fh38fh38fh38fh38fh38fh')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(',')
 
 # Application definition
 INSTALLED_APPS = [
@@ -102,7 +113,10 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Telegram Bot settings
-TELEGRAM_BOT_TOKEN = '7824676431:AAEo_evG5fAysSjrRdNH1DbHzoq7YJJsqss'
+TELEGRAM_BOT_TOKEN = config('TELEGRAM_BOT_TOKEN', default='7824676431:AAEo_evG5fAysSjrRdNH1DbHzoq7YJJsqss')
+
+# Base URL for verification links
+BASE_URL = config('BASE_URL', default='http://localhost:8000')
 
 # Face recognition settings
 FACE_DATA_PATH = os.path.join(BASE_DIR, 'media', 'face_data')
