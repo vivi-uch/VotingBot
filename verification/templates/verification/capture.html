@@ -148,6 +148,7 @@
     </div>
 
     <script>
+      // WebSocket setup
       const sessionId = "{{ session_id }}";
       const ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const ws_path = `${ws_scheme}://${window.location.host}/ws/verification/${sessionId}/`;
@@ -169,6 +170,7 @@
         console.log("WebSocket connection closed");
       };
 
+      // DOM elements
       const video = document.getElementById("video");
       const canvas = document.getElementById("canvas");
       const startCameraBtn = document.getElementById("startCamera");

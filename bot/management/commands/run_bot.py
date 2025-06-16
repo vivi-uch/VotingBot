@@ -4,6 +4,7 @@ import sys
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from django.utils import timezone
+from django.db.models import Count
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
@@ -42,7 +43,8 @@ logger = logging.getLogger(__name__)
     ENTER_CANDIDATE_DETAILS,
     SELECT_POSITION,
     VOTING_BY_POSITION,
-) = range(18)
+    VIEW_RESULTS,
+) = range(19)
 
 class Command(BaseCommand):
     help = 'Run the Telegram bot for e-voting'
@@ -117,6 +119,7 @@ class Command(BaseCommand):
                 CommandHandler('voters', self.voters),
                 CommandHandler('report', self.report),
                 CommandHandler('view_candidate', self.view_candidate),
+                CommandHandler('results', self.results),
             ],
             states={
                 WAITING_FACE_CAPTURE: [
@@ -150,6 +153,7 @@ class Command(BaseCommand):
                 ADD_VOTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.add_voter)],
                 VIEW_CANDIDATES: [CallbackQueryHandler(self.view_candidates_callback)],
                 VIEW_REPORTS: [CallbackQueryHandler(self.admin_action)],
+                VIEW_RESULTS: [CallbackQueryHandler(self.view_results_callback)],
             },
             fallbacks=[CommandHandler('cancel', self.cancel)],
             conversation_timeout=300,
@@ -158,12 +162,15 @@ class Command(BaseCommand):
         )
         
         self.application.add_handler(conv_handler)
-        self.application.add_handler(CommandHandler('results', self.results))
         self.application.add_error_handler(self.error_handler)
         
         # Start cleanup thread
         cleanup_thread = threading.Thread(target=self.cleanup_expired_sessions, daemon=True)
         cleanup_thread.start()
+        
+        # Start election status update thread
+        status_update_thread = threading.Thread(target=self.update_election_statuses_periodically, daemon=True)
+        status_update_thread.start()
         
         self.stdout.write("Bot is starting... Press Ctrl+C to stop")
         
@@ -178,6 +185,42 @@ class Command(BaseCommand):
             connect_timeout=30,
             pool_timeout=30
         )
+    
+    def update_election_statuses_periodically(self):
+        """Update election statuses every minute"""
+        import time
+        
+        while True:
+            try:
+                self.update_election_statuses()
+                time.sleep(60)  # Check every minute
+            except Exception as e:
+                logger.error(f"Error updating election statuses: {e}")
+                time.sleep(60)
+    
+    def update_election_statuses(self):
+        """Update election statuses based on current time"""
+        try:
+            from django.db import transaction
+            
+            now = timezone.now()
+            
+            with transaction.atomic():
+                # Update pending elections that should be active
+                Election.objects.filter(
+                    status='pending',
+                    start_time__lte=now,
+                    end_time__gt=now
+                ).update(status='active')
+                
+                # Update active elections that should be ended
+                Election.objects.filter(
+                    status='active',
+                    end_time__lte=now
+                ).update(status='ended')
+                
+        except Exception as e:
+            logger.error(f"Error updating election statuses: {e}")
     
     # Database operations wrapped with sync_to_async
     @sync_to_async
@@ -225,6 +268,77 @@ class Command(BaseCommand):
     def get_all_elections_db(self):
         elections = Election.objects.all()
         return [(str(e.id), e.title, e.start_time, e.end_time, e.status) for e in elections]
+    
+    @sync_to_async
+    def get_ended_elections_db(self):
+        """Get elections that have ended"""
+        elections = Election.objects.filter(status='ended')
+        return [(str(e.id), e.title, e.start_time, e.end_time) for e in elections]
+    
+    @sync_to_async
+    def get_election_results_db(self, election_id):
+        """Get detailed results for an election"""
+        try:
+            election = Election.objects.get(id=election_id)
+            
+            # Update election status first
+            now = timezone.now()
+            if election.end_time <= now and election.status != 'ended':
+                election.status = 'ended'
+                election.save()
+            
+            # Get positions
+            positions = election.candidates.values_list('position', flat=True).distinct()
+            
+            results = {
+                'election_title': election.title,
+                'election_status': election.status,
+                'start_time': election.start_time,
+                'end_time': election.end_time,
+                'positions': {}
+            }
+            
+            total_voters = 0
+            
+            for position in positions:
+                # Get candidates for this position with vote counts
+                candidates = election.candidates.filter(position=position).annotate(
+                    vote_count=Count('vote')
+                ).order_by('-vote_count')
+                
+                position_results = []
+                position_total_votes = 0
+                
+                for candidate in candidates:
+                    position_total_votes += candidate.vote_count
+                    position_results.append({
+                        'name': candidate.name,
+                        'vote_count': candidate.vote_count,
+                        'candidate_id': str(candidate.id)
+                    })
+                
+                # Calculate percentages
+                for candidate_result in position_results:
+                    if position_total_votes > 0:
+                        candidate_result['percentage'] = (candidate_result['vote_count'] / position_total_votes) * 100
+                    else:
+                        candidate_result['percentage'] = 0
+                
+                results['positions'][position] = {
+                    'candidates': position_results,
+                    'total_votes': position_total_votes
+                }
+                
+                total_voters = max(total_voters, position_total_votes)
+            
+            results['total_voters'] = total_voters
+            return results
+            
+        except Election.DoesNotExist:
+            return None
+        except Exception as e:
+            logger.error(f"Error getting election results: {e}")
+            return None
     
     @sync_to_async
     def get_election_positions_db(self, election_id):
@@ -445,6 +559,7 @@ class Command(BaseCommand):
                     [InlineKeyboardButton("Create Election", callback_data='create_election')],
                     [InlineKeyboardButton("Add Candidate", callback_data='add_candidate')],
                     [InlineKeyboardButton("View Candidates", callback_data='view_candidates')],
+                    [InlineKeyboardButton("View Results", callback_data='view_results')],
                     [InlineKeyboardButton("View Reports", callback_data='view_reports')],
                     [InlineKeyboardButton("Add Admin", callback_data='add_admin')],
                     [InlineKeyboardButton("Remove Admin", callback_data='remove_admin')],
@@ -515,6 +630,26 @@ class Command(BaseCommand):
             await query.message.reply_text("👀 Select an election to view candidates:", reply_markup=reply_markup)
             return VIEW_CANDIDATES
             
+        elif action == 'view_results':
+            # Show all elections for results viewing
+            all_elections = await self.get_all_elections_db()
+            if not all_elections:
+                await query.message.reply_text("❌ No elections available.")
+                return ADMIN_ACTION
+            
+            keyboard = []
+            for election_id, title, start_time, end_time, status in all_elections:
+                status_emoji = "🏁" if status == 'ended' else "🔴" if status == 'active' else "⏳"
+                keyboard.append([InlineKeyboardButton(
+                    f"{status_emoji} {title} ({status})", 
+                    callback_data=f"view_result_{election_id}"
+                )])
+            
+            keyboard.append([InlineKeyboardButton("🔙 Back to Admin Menu", callback_data='back_to_admin')])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text("📊 Select an election to view results:", reply_markup=reply_markup)
+            return VIEW_RESULTS
+            
         elif action == 'view_reports':
             reports = await self.get_reports_db()
             if not reports:
@@ -566,6 +701,7 @@ class Command(BaseCommand):
                 [InlineKeyboardButton("Create Election", callback_data='create_election')],
                 [InlineKeyboardButton("Add Candidate", callback_data='add_candidate')],
                 [InlineKeyboardButton("View Candidates", callback_data='view_candidates')],
+                [InlineKeyboardButton("View Results", callback_data='view_results')],
                 [InlineKeyboardButton("View Reports", callback_data='view_reports')],
                 [InlineKeyboardButton("Add Admin", callback_data='add_admin')],
                 [InlineKeyboardButton("Remove Admin", callback_data='remove_admin')],
@@ -576,6 +712,62 @@ class Command(BaseCommand):
             return ADMIN_ACTION
         
         return ADMIN_ACTION
+    
+    async def view_results_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle results viewing callback"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'back_to_admin':
+            return await self.admin_action(update, context)
+        
+        if query.data.startswith("view_result_"):
+            election_id = query.data.replace("view_result_", "")
+            
+            # Get election results
+            results = await self.get_election_results_db(election_id)
+            
+            if not results:
+                await query.message.reply_text("❌ Election not found or error getting results.")
+                return ADMIN_ACTION
+            
+            # Format results message
+            message = f"📊 **{results['election_title']}**\n\n"
+            message += f"**Status:** {results['election_status'].upper()}\n"
+            message += f"**Period:** {results['start_time'].strftime('%Y-%m-%d %H:%M')} to {results['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+            message += f"**Total Voters:** {results['total_voters']}\n\n"
+            
+            if results['election_status'] != 'ended':
+                message += "⚠️ **Election is still ongoing. Results are preliminary.**\n\n"
+            
+            # Add results by position
+            for position, position_data in results['positions'].items():
+                message += f"📍 **{position}**\n"
+                message += f"Total votes: {position_data['total_votes']}\n"
+                
+                if position_data['candidates']:
+                    # Sort candidates by vote count
+                    sorted_candidates = sorted(
+                        position_data['candidates'], 
+                        key=lambda x: x['vote_count'], 
+                        reverse=True
+                    )
+                    
+                    for i, candidate in enumerate(sorted_candidates, 1):
+                        winner_mark = "🏆" if i == 1 and candidate['vote_count'] > 0 else "  "
+                        message += f"{winner_mark} {candidate['name']}: {candidate['vote_count']} votes ({candidate['percentage']:.1f}%)\n"
+                else:
+                    message += "  No candidates\n"
+                
+                message += "\n"
+            
+            # Add back button
+            keyboard = [[InlineKeyboardButton("🔙 Back to Results Menu", callback_data='view_results')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_text(message, reply_markup=reply_markup, parse_mode='Markdown')
+        
+        return VIEW_RESULTS
     
     async def select_election_for_candidate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -754,6 +946,7 @@ class Command(BaseCommand):
                         [InlineKeyboardButton("Create Election", callback_data='create_election')],
                         [InlineKeyboardButton("Add Candidate", callback_data='add_candidate')],
                         [InlineKeyboardButton("View Candidates", callback_data='view_candidates')],
+                        [InlineKeyboardButton("View Results", callback_data='view_results')],
                         [InlineKeyboardButton("View Reports", callback_data='view_reports')],
                         [InlineKeyboardButton("Add Admin", callback_data='add_admin')],
                         [InlineKeyboardButton("Remove Admin", callback_data='remove_admin')],
@@ -1254,22 +1447,48 @@ class Command(BaseCommand):
         return ConversationHandler.END
     
     async def results(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /results command - show results for ended elections"""
         try:
-            elections = await self.get_all_elections_db()
-            if elections:
-                message = "📊 Election Results\n\n"
-                for election_id, title, start_time, end_time, status in elections:
-                    message += f"• **{title}**\n"
-                    message += f"  Status: {status}\n"
-                    message += f"  Start: {start_time}\n"
-                    message += f"  End: {end_time}\n\n"
-            else:
-                message = "📊 No elections found."
+            # Update election statuses first
+            self.update_election_statuses()
             
-            await update.message.reply_text(message)
+            # Get ended elections
+            ended_elections = await self.get_ended_elections_db()
+            
+            if not ended_elections:
+                # Check if there are any elections at all
+                all_elections = await self.get_all_elections_db()
+                if not all_elections:
+                    await update.message.reply_text("📊 No elections found.")
+                else:
+                    await update.message.reply_text(
+                        "📊 No completed elections yet.\n\n"
+                        "Elections must be finished before results can be viewed.\n"
+                        "Check back after the election end time."
+                    )
+                return ConversationHandler.END
+            
+            # Show ended elections for results viewing
+            keyboard = []
+            for election_id, title, start_time, end_time in ended_elections:
+                keyboard.append([InlineKeyboardButton(
+                    f"🏁 {title}", 
+                    callback_data=f"view_result_{election_id}"
+                )])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "📊 **Election Results**\n\n"
+                "Select a completed election to view results:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+            return VIEW_RESULTS
+            
         except Exception as e:
             logger.error(f"Error getting results: {e}")
             await update.message.reply_text("❌ Error retrieving results.")
+            return ConversationHandler.END
     
     async def check_voter_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Voter registration checking feature coming soon!")

@@ -1,0 +1,14 @@
+Performance Test Results - 2025-06-16 13:10:14
+============================================================
+
+13:10:14 | PASS | Face Recognizer Init | 10.030s | 
+13:10:14 | PASS | Single Vote Storage | 0.009s | - Vote ID: 3...
+13:10:14 | PASS | Vote Check Query | 0.004s | - Has voted: True
+13:10:14 | PASS | Vote Count Query | 0.004s | - Total votes: 1
+13:10:14 | PASS | Voter Lookup | 0.002s | - Exists: True
+13:10:14 | PASS | Election List Query | 0.001s | - Found: 4 elections
+13:10:14 | PASS | Candidate List Query | 0.001s | - Found: 4 candidates
+
+Total Tests: 7
+Passed: 7
+Total Time: 10.051s
